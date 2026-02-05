@@ -7,6 +7,8 @@ import StockTable from '@/components/StockTable';
 import SavedDashboards from '@/components/SavedDashboards';
 import { StockTableRow, SavedDashboard } from '@/types';
 
+const LOCAL_STORAGE_KEY = 'stock-dashboard-data';
+
 function Dashboard() {
   const searchParams = useSearchParams();
   const [dashboards, setDashboards] = useState<SavedDashboard[]>([]);
@@ -15,21 +17,73 @@ function Dashboard() {
   const [stockData, setStockData] = useState<Map<string, StockTableRow>>(new Map());
   const [isLoading, setIsLoading] = useState(false);
   const [isDashboardsLoading, setIsDashboardsLoading] = useState(true);
-  const [saveTimeout, setSaveTimeout] = useState<NodeJS.Timeout | null>(null);
 
-  // Fetch all dashboards on mount
+  // Load from localStorage
+  const loadFromLocalStorage = (): SavedDashboard[] => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const stored = localStorage.getItem(LOCAL_STORAGE_KEY);
+      if (stored) {
+        return JSON.parse(stored);
+      }
+    } catch (e) {
+      console.error('Failed to load from localStorage:', e);
+    }
+    return [];
+  };
+
+  // Save to localStorage
+  const saveToLocalStorage = (data: SavedDashboard[]) => {
+    if (typeof window === 'undefined') return;
+    try {
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(data));
+    } catch (e) {
+      console.error('Failed to save to localStorage:', e);
+    }
+  };
+
+  // Fetch dashboards on mount
   useEffect(() => {
     const fetchDashboards = async () => {
       try {
         const response = await fetch('/api/dashboards');
         if (response.ok) {
-          const data = await response.json();
-          setDashboards(data);
+          const apiData = await response.json();
+
+          // Merge with localStorage data
+          const localData = loadFromLocalStorage();
+          const mergedMap = new Map<string, SavedDashboard>();
+
+          // Add local data first
+          localData.forEach((d) => mergedMap.set(d.id, d));
+
+          // Override with API data (if Redis is configured)
+          apiData.forEach((d: SavedDashboard) => mergedMap.set(d.id, d));
+
+          const merged = Array.from(mergedMap.values()).sort(
+            (a, b) => b.updatedAt - a.updatedAt
+          );
+
+          setDashboards(merged);
+          saveToLocalStorage(merged);
 
           // Check if there's a dashboard ID in the URL
           const dashboardId = searchParams.get('dashboard');
           if (dashboardId) {
-            const dashboard = data.find((d: SavedDashboard) => d.id === dashboardId);
+            const dashboard = merged.find((d) => d.id === dashboardId);
+            if (dashboard) {
+              setCurrentDashboardId(dashboard.id);
+              setTickers(dashboard.tickers);
+            }
+          }
+        } else {
+          // Fallback to localStorage
+          const localData = loadFromLocalStorage();
+          setDashboards(localData);
+
+          const dashboardId = searchParams.get('dashboard');
+          if (dashboardId) {
+            const dashboard = localData.find((d) => d.id === dashboardId);
             if (dashboard) {
               setCurrentDashboardId(dashboard.id);
               setTickers(dashboard.tickers);
@@ -38,6 +92,9 @@ function Dashboard() {
         }
       } catch (error) {
         console.error('Failed to fetch dashboards:', error);
+        // Fallback to localStorage
+        const localData = loadFromLocalStorage();
+        setDashboards(localData);
       } finally {
         setIsDashboardsLoading(false);
       }
@@ -46,40 +103,44 @@ function Dashboard() {
     fetchDashboards();
   }, [searchParams]);
 
-  // Auto-save tickers to current dashboard when they change (debounced)
+  // Save dashboards to localStorage whenever they change
+  useEffect(() => {
+    if (dashboards.length > 0) {
+      saveToLocalStorage(dashboards);
+    }
+  }, [dashboards]);
+
+  // Auto-save tickers to current dashboard when they change
   useEffect(() => {
     if (!currentDashboardId) return;
 
-    // Clear existing timeout
-    if (saveTimeout) {
-      clearTimeout(saveTimeout);
-    }
+    const saveDashboard = async () => {
+      // Update local state immediately
+      setDashboards((prev) => {
+        const updated = prev.map((d) =>
+          d.id === currentDashboardId
+            ? { ...d, tickers, updatedAt: Date.now() }
+            : d
+        );
+        saveToLocalStorage(updated);
+        return updated;
+      });
 
-    // Debounce the save
-    const timeout = setTimeout(async () => {
+      // Try to save to API
       try {
-        const response = await fetch(`/api/dashboards/${currentDashboardId}`, {
+        await fetch(`/api/dashboards/${currentDashboardId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ tickers }),
         });
-
-        if (response.ok) {
-          const updated = await response.json();
-          setDashboards((prev) =>
-            prev.map((d) => (d.id === currentDashboardId ? updated : d))
-          );
-        }
       } catch (error) {
-        console.error('Failed to save dashboard:', error);
+        console.error('Failed to save to API:', error);
+        // Already saved locally, so this is fine
       }
-    }, 1000);
-
-    setSaveTimeout(timeout);
-
-    return () => {
-      if (timeout) clearTimeout(timeout);
     };
+
+    const timeout = setTimeout(saveDashboard, 500);
+    return () => clearTimeout(timeout);
   }, [tickers, currentDashboardId]);
 
   // Fetch data for a single ticker
@@ -154,25 +215,40 @@ function Dashboard() {
   }, [tickers, fetchTickerData]);
 
   const handleCreateDashboard = async (name: string) => {
+    const id = Date.now().toString(36) + Math.random().toString(36).substr(2);
+    const now = Date.now();
+
+    const newDashboard: SavedDashboard = {
+      id,
+      name: name.trim(),
+      tickers: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    // Update local state immediately
+    setDashboards((prev) => {
+      const updated = [newDashboard, ...prev];
+      saveToLocalStorage(updated);
+      return updated;
+    });
+    setCurrentDashboardId(newDashboard.id);
+    setTickers([]);
+    setStockData(new Map());
+
+    // Update URL
+    window.history.pushState({}, '', `?dashboard=${newDashboard.id}`);
+
+    // Try to save to API
     try {
-      const response = await fetch('/api/dashboards', {
+      await fetch('/api/dashboards', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, tickers: [] }),
       });
-
-      if (response.ok) {
-        const newDashboard = await response.json();
-        setDashboards((prev) => [newDashboard, ...prev]);
-        setCurrentDashboardId(newDashboard.id);
-        setTickers([]);
-        setStockData(new Map());
-
-        // Update URL
-        window.history.pushState({}, '', `?dashboard=${newDashboard.id}`);
-      }
     } catch (error) {
-      console.error('Failed to create dashboard:', error);
+      console.error('Failed to save to API:', error);
+      // Already saved locally
     }
   };
 
@@ -186,41 +262,47 @@ function Dashboard() {
   };
 
   const handleDeleteDashboard = async (id: string) => {
-    try {
-      const response = await fetch(`/api/dashboards/${id}`, {
-        method: 'DELETE',
-      });
+    // Update local state immediately
+    setDashboards((prev) => {
+      const updated = prev.filter((d) => d.id !== id);
+      saveToLocalStorage(updated);
+      return updated;
+    });
 
-      if (response.ok) {
-        setDashboards((prev) => prev.filter((d) => d.id !== id));
-        if (currentDashboardId === id) {
-          setCurrentDashboardId(null);
-          setTickers([]);
-          setStockData(new Map());
-          window.history.pushState({}, '', '/');
-        }
-      }
+    if (currentDashboardId === id) {
+      setCurrentDashboardId(null);
+      setTickers([]);
+      setStockData(new Map());
+      window.history.pushState({}, '', '/');
+    }
+
+    // Try to delete from API
+    try {
+      await fetch(`/api/dashboards/${id}`, { method: 'DELETE' });
     } catch (error) {
-      console.error('Failed to delete dashboard:', error);
+      console.error('Failed to delete from API:', error);
     }
   };
 
   const handleRenameDashboard = async (id: string, newName: string) => {
+    // Update local state immediately
+    setDashboards((prev) => {
+      const updated = prev.map((d) =>
+        d.id === id ? { ...d, name: newName, updatedAt: Date.now() } : d
+      );
+      saveToLocalStorage(updated);
+      return updated;
+    });
+
+    // Try to save to API
     try {
-      const response = await fetch(`/api/dashboards/${id}`, {
+      await fetch(`/api/dashboards/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: newName }),
       });
-
-      if (response.ok) {
-        const updated = await response.json();
-        setDashboards((prev) =>
-          prev.map((d) => (d.id === id ? updated : d))
-        );
-      }
     } catch (error) {
-      console.error('Failed to rename dashboard:', error);
+      console.error('Failed to rename in API:', error);
     }
   };
 
@@ -230,8 +312,7 @@ function Dashboard() {
       return;
     }
     if (tickers.includes(ticker)) {
-      alert(`${ticker} is already in your list.`);
-      return;
+      return; // Silently ignore duplicates
     }
     setTickers((prev) => [...prev, ticker]);
   };
