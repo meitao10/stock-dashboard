@@ -6,6 +6,7 @@ import { SavedDashboard } from '@/types';
 interface SavedDashboardsProps {
   dashboards: SavedDashboard[];
   currentDashboardId: string | null;
+  isLoading: boolean;
   onSelectDashboard: (dashboard: SavedDashboard) => void;
   onCreateDashboard: (name: string) => void;
   onDeleteDashboard: (id: string) => void;
@@ -15,6 +16,7 @@ interface SavedDashboardsProps {
 export default function SavedDashboards({
   dashboards,
   currentDashboardId,
+  isLoading,
   onSelectDashboard,
   onCreateDashboard,
   onDeleteDashboard,
@@ -46,10 +48,19 @@ export default function SavedDashboards({
     setEditName(dashboard.name);
   };
 
+  const copyShareLink = (id: string) => {
+    const url = `${window.location.origin}?dashboard=${id}`;
+    navigator.clipboard.writeText(url);
+    alert('Share link copied to clipboard!');
+  };
+
   return (
     <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
       <div className="flex justify-between items-center mb-4">
-        <h2 className="text-lg font-semibold text-gray-800">Saved Dashboards</h2>
+        <h2 className="text-lg font-semibold text-gray-800">
+          Saved Dashboards
+          {isLoading && <span className="ml-2 text-sm text-gray-400">(loading...)</span>}
+        </h2>
         {!isCreating && (
           <button
             onClick={() => setIsCreating(true)}
@@ -67,7 +78,7 @@ export default function SavedDashboards({
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             placeholder="Dashboard name..."
-            className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+            className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 text-gray-900"
             autoFocus
             onKeyDown={(e) => {
               if (e.key === 'Enter') handleCreate();
@@ -96,7 +107,7 @@ export default function SavedDashboards({
         </div>
       )}
 
-      {dashboards.length === 0 ? (
+      {dashboards.length === 0 && !isLoading ? (
         <p className="text-gray-500 text-sm">
           No saved dashboards yet. Create one to save your stock lists.
         </p>
@@ -116,7 +127,7 @@ export default function SavedDashboards({
                   type="text"
                   value={editName}
                   onChange={(e) => setEditName(e.target.value)}
-                  className="px-2 py-1 border border-gray-300 rounded text-sm w-32"
+                  className="px-2 py-1 border border-gray-300 rounded text-sm w-32 text-gray-900"
                   autoFocus
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') handleRename(dashboard.id);
@@ -139,6 +150,16 @@ export default function SavedDashboards({
                     ({dashboard.tickers.length})
                   </span>
                   <div className="hidden group-hover:flex items-center gap-1 ml-1">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        copyShareLink(dashboard.id);
+                      }}
+                      className="text-gray-400 hover:text-blue-600 text-xs"
+                      title="Copy share link"
+                    >
+                      Share
+                    </button>
                     <button
                       onClick={(e) => {
                         e.stopPropagation();

@@ -1,83 +1,86 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import AddTickerForm from '@/components/AddTickerForm';
 import StockTable from '@/components/StockTable';
 import SavedDashboards from '@/components/SavedDashboards';
 import { StockTableRow, SavedDashboard } from '@/types';
 
-const DASHBOARDS_STORAGE_KEY = 'stock-dashboard-saved';
-const CURRENT_DASHBOARD_KEY = 'stock-dashboard-current';
-
-function generateId(): string {
-  return Date.now().toString(36) + Math.random().toString(36).substr(2);
-}
-
-export default function Home() {
+function Dashboard() {
+  const searchParams = useSearchParams();
   const [dashboards, setDashboards] = useState<SavedDashboard[]>([]);
   const [currentDashboardId, setCurrentDashboardId] = useState<string | null>(null);
   const [tickers, setTickers] = useState<string[]>([]);
   const [stockData, setStockData] = useState<Map<string, StockTableRow>>(new Map());
   const [isLoading, setIsLoading] = useState(false);
-  const [isInitialized, setIsInitialized] = useState(false);
+  const [isDashboardsLoading, setIsDashboardsLoading] = useState(true);
+  const [saveTimeout, setSaveTimeout] = useState<NodeJS.Timeout | null>(null);
 
-  // Load dashboards from localStorage on mount
+  // Fetch all dashboards on mount
   useEffect(() => {
-    const storedDashboards = localStorage.getItem(DASHBOARDS_STORAGE_KEY);
-    const storedCurrentId = localStorage.getItem(CURRENT_DASHBOARD_KEY);
-
-    if (storedDashboards) {
+    const fetchDashboards = async () => {
       try {
-        const parsed = JSON.parse(storedDashboards);
-        if (Array.isArray(parsed)) {
-          setDashboards(parsed);
+        const response = await fetch('/api/dashboards');
+        if (response.ok) {
+          const data = await response.json();
+          setDashboards(data);
 
-          // Load the last selected dashboard
-          if (storedCurrentId) {
-            const dashboard = parsed.find((d: SavedDashboard) => d.id === storedCurrentId);
+          // Check if there's a dashboard ID in the URL
+          const dashboardId = searchParams.get('dashboard');
+          if (dashboardId) {
+            const dashboard = data.find((d: SavedDashboard) => d.id === dashboardId);
             if (dashboard) {
               setCurrentDashboardId(dashboard.id);
               setTickers(dashboard.tickers);
             }
           }
         }
-      } catch (e) {
-        console.error('Failed to parse stored dashboards:', e);
+      } catch (error) {
+        console.error('Failed to fetch dashboards:', error);
+      } finally {
+        setIsDashboardsLoading(false);
       }
-    }
-    setIsInitialized(true);
-  }, []);
+    };
 
-  // Save dashboards to localStorage when they change
-  useEffect(() => {
-    if (isInitialized) {
-      localStorage.setItem(DASHBOARDS_STORAGE_KEY, JSON.stringify(dashboards));
-    }
-  }, [dashboards, isInitialized]);
+    fetchDashboards();
+  }, [searchParams]);
 
-  // Save current dashboard ID to localStorage
+  // Auto-save tickers to current dashboard when they change (debounced)
   useEffect(() => {
-    if (isInitialized) {
-      if (currentDashboardId) {
-        localStorage.setItem(CURRENT_DASHBOARD_KEY, currentDashboardId);
-      } else {
-        localStorage.removeItem(CURRENT_DASHBOARD_KEY);
+    if (!currentDashboardId) return;
+
+    // Clear existing timeout
+    if (saveTimeout) {
+      clearTimeout(saveTimeout);
+    }
+
+    // Debounce the save
+    const timeout = setTimeout(async () => {
+      try {
+        const response = await fetch(`/api/dashboards/${currentDashboardId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tickers }),
+        });
+
+        if (response.ok) {
+          const updated = await response.json();
+          setDashboards((prev) =>
+            prev.map((d) => (d.id === currentDashboardId ? updated : d))
+          );
+        }
+      } catch (error) {
+        console.error('Failed to save dashboard:', error);
       }
-    }
-  }, [currentDashboardId, isInitialized]);
+    }, 1000);
 
-  // Auto-save tickers to current dashboard when they change
-  useEffect(() => {
-    if (isInitialized && currentDashboardId) {
-      setDashboards((prev) =>
-        prev.map((d) =>
-          d.id === currentDashboardId
-            ? { ...d, tickers, updatedAt: Date.now() }
-            : d
-        )
-      );
-    }
-  }, [tickers, currentDashboardId, isInitialized]);
+    setSaveTimeout(timeout);
+
+    return () => {
+      if (timeout) clearTimeout(timeout);
+    };
+  }, [tickers, currentDashboardId]);
 
   // Fetch data for a single ticker
   const fetchTickerData = useCallback(async (ticker: string) => {
@@ -150,41 +153,75 @@ export default function Home() {
     fetchAll();
   }, [tickers, fetchTickerData]);
 
-  const handleCreateDashboard = (name: string) => {
-    const newDashboard: SavedDashboard = {
-      id: generateId(),
-      name,
-      tickers: [],
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-    setDashboards((prev) => [...prev, newDashboard]);
-    setCurrentDashboardId(newDashboard.id);
-    setTickers([]);
-    setStockData(new Map());
+  const handleCreateDashboard = async (name: string) => {
+    try {
+      const response = await fetch('/api/dashboards', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, tickers: [] }),
+      });
+
+      if (response.ok) {
+        const newDashboard = await response.json();
+        setDashboards((prev) => [newDashboard, ...prev]);
+        setCurrentDashboardId(newDashboard.id);
+        setTickers([]);
+        setStockData(new Map());
+
+        // Update URL
+        window.history.pushState({}, '', `?dashboard=${newDashboard.id}`);
+      }
+    } catch (error) {
+      console.error('Failed to create dashboard:', error);
+    }
   };
 
   const handleSelectDashboard = (dashboard: SavedDashboard) => {
     setCurrentDashboardId(dashboard.id);
     setTickers(dashboard.tickers);
     setStockData(new Map());
+
+    // Update URL
+    window.history.pushState({}, '', `?dashboard=${dashboard.id}`);
   };
 
-  const handleDeleteDashboard = (id: string) => {
-    setDashboards((prev) => prev.filter((d) => d.id !== id));
-    if (currentDashboardId === id) {
-      setCurrentDashboardId(null);
-      setTickers([]);
-      setStockData(new Map());
+  const handleDeleteDashboard = async (id: string) => {
+    try {
+      const response = await fetch(`/api/dashboards/${id}`, {
+        method: 'DELETE',
+      });
+
+      if (response.ok) {
+        setDashboards((prev) => prev.filter((d) => d.id !== id));
+        if (currentDashboardId === id) {
+          setCurrentDashboardId(null);
+          setTickers([]);
+          setStockData(new Map());
+          window.history.pushState({}, '', '/');
+        }
+      }
+    } catch (error) {
+      console.error('Failed to delete dashboard:', error);
     }
   };
 
-  const handleRenameDashboard = (id: string, newName: string) => {
-    setDashboards((prev) =>
-      prev.map((d) =>
-        d.id === id ? { ...d, name: newName, updatedAt: Date.now() } : d
-      )
-    );
+  const handleRenameDashboard = async (id: string, newName: string) => {
+    try {
+      const response = await fetch(`/api/dashboards/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newName }),
+      });
+
+      if (response.ok) {
+        const updated = await response.json();
+        setDashboards((prev) =>
+          prev.map((d) => (d.id === id ? updated : d))
+        );
+      }
+    } catch (error) {
+      console.error('Failed to rename dashboard:', error);
+    }
   };
 
   const handleAddTicker = (ticker: string) => {
@@ -229,6 +266,7 @@ export default function Home() {
         <SavedDashboards
           dashboards={dashboards}
           currentDashboardId={currentDashboardId}
+          isLoading={isDashboardsLoading}
           onSelectDashboard={handleSelectDashboard}
           onCreateDashboard={handleCreateDashboard}
           onDeleteDashboard={handleDeleteDashboard}
@@ -275,5 +313,13 @@ export default function Home() {
         </footer>
       </div>
     </div>
+  );
+}
+
+export default function Home() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-gray-50 flex items-center justify-center">Loading...</div>}>
+      <Dashboard />
+    </Suspense>
   );
 }
