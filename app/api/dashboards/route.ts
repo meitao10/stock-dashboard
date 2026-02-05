@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '@/lib/auth';
 import { SavedDashboard } from '@/types';
+import '@/types'; // Import NextAuth type extensions
 
 // Check if Redis is configured
 const isRedisConfigured = () => {
   return !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
 };
 
-// Lazy load Redis to avoid errors when not configured
+// Lazy load Redis
 const getRedis = async () => {
   if (!isRedisConfigured()) return null;
   const { Redis } = await import('@upstash/redis');
@@ -16,42 +19,43 @@ const getRedis = async () => {
   });
 };
 
-const DASHBOARDS_KEY = 'dashboards';
-const DASHBOARD_PREFIX = 'dashboard:';
+const getUserDashboardsKey = (userId: string) => `user:${userId}:dashboards`;
+const getDashboardKey = (userId: string, dashboardId: string) => `user:${userId}:dashboard:${dashboardId}`;
 
-// GET /api/dashboards - List all dashboards
+// GET /api/dashboards - List all dashboards for the current user
 export async function GET() {
   try {
+    const session = await getServerSession(authOptions);
+    if (!session?.user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const userId = session.user.id;
     const redis = await getRedis();
 
     if (!redis) {
-      // Return empty array if Redis not configured - frontend will use localStorage
       return NextResponse.json([]);
     }
 
-    // Get all dashboard IDs
-    const dashboardIds = await redis.smembers(DASHBOARDS_KEY);
+    const dashboardIds = await redis.smembers(getUserDashboardsKey(userId));
 
     if (!dashboardIds || dashboardIds.length === 0) {
       return NextResponse.json([]);
     }
 
-    // Fetch all dashboards
     const dashboards: SavedDashboard[] = [];
     for (const id of dashboardIds) {
-      const dashboard = await redis.get<SavedDashboard>(`${DASHBOARD_PREFIX}${id}`);
+      const dashboard = await redis.get<SavedDashboard>(getDashboardKey(userId, id as string));
       if (dashboard) {
         dashboards.push(dashboard);
       }
     }
 
-    // Sort by updatedAt descending
     dashboards.sort((a, b) => b.updatedAt - a.updatedAt);
 
     return NextResponse.json(dashboards);
   } catch (error) {
     console.error('Error fetching dashboards:', error);
-    // Return empty array on error - frontend will use localStorage
     return NextResponse.json([]);
   }
 }
@@ -59,6 +63,12 @@ export async function GET() {
 // POST /api/dashboards - Create a new dashboard
 export async function POST(request: NextRequest) {
   try {
+    const session = await getServerSession(authOptions);
+    if (!session?.user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const userId = session.user.id;
     const body = await request.json();
     const { name, tickers = [] } = body;
 
@@ -83,25 +93,16 @@ export async function POST(request: NextRequest) {
     const redis = await getRedis();
 
     if (redis) {
-      // Save dashboard and add to set
-      await redis.set(`${DASHBOARD_PREFIX}${id}`, dashboard);
-      await redis.sadd(DASHBOARDS_KEY, id);
+      await redis.set(getDashboardKey(userId, id), dashboard);
+      await redis.sadd(getUserDashboardsKey(userId), id);
     }
 
     return NextResponse.json(dashboard, { status: 201 });
   } catch (error) {
     console.error('Error creating dashboard:', error);
-    // Still return the dashboard so frontend can save locally
-    const body = await request.json().catch(() => ({}));
-    const id = Date.now().toString(36) + Math.random().toString(36).substr(2);
-    const now = Date.now();
-
-    return NextResponse.json({
-      id,
-      name: body.name || 'New Dashboard',
-      tickers: body.tickers || [],
-      createdAt: now,
-      updatedAt: now,
-    }, { status: 201 });
+    return NextResponse.json(
+      { error: 'Failed to create dashboard' },
+      { status: 500 }
+    );
   }
 }

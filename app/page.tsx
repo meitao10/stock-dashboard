@@ -2,16 +2,20 @@
 
 import { useState, useEffect, useCallback, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
+import { useSession, signOut } from 'next-auth/react';
+import { useRouter } from 'next/navigation';
 import AddTickerForm from '@/components/AddTickerForm';
 import StockTable from '@/components/StockTable';
 import SavedDashboards from '@/components/SavedDashboards';
 import { StockTableRow, SavedDashboard } from '@/types';
 
-const LOCAL_STORAGE_KEY = 'stock-dashboard-data';
 const WORKING_TICKERS_KEY = 'stock-dashboard-working';
 
 function Dashboard() {
   const searchParams = useSearchParams();
+  const router = useRouter();
+  const { data: session, status } = useSession();
+
   const [dashboards, setDashboards] = useState<SavedDashboard[]>([]);
   const [currentDashboardId, setCurrentDashboardId] = useState<string | null>(null);
   const [tickers, setTickers] = useState<string[]>([]);
@@ -21,29 +25,12 @@ function Dashboard() {
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [saveName, setSaveName] = useState('');
 
-  // Load from localStorage
-  const loadFromLocalStorage = (): SavedDashboard[] => {
-    if (typeof window === 'undefined') return [];
-    try {
-      const stored = localStorage.getItem(LOCAL_STORAGE_KEY);
-      if (stored) {
-        return JSON.parse(stored);
-      }
-    } catch (e) {
-      console.error('Failed to load from localStorage:', e);
+  // Redirect to login if not authenticated
+  useEffect(() => {
+    if (status === 'unauthenticated') {
+      router.push('/login');
     }
-    return [];
-  };
-
-  // Save to localStorage
-  const saveToLocalStorage = (data: SavedDashboard[]) => {
-    if (typeof window === 'undefined') return;
-    try {
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(data));
-    } catch (e) {
-      console.error('Failed to save to localStorage:', e);
-    }
-  };
+  }, [status, router]);
 
   // Load working tickers (unsaved)
   const loadWorkingTickers = (): string[] => {
@@ -69,30 +56,21 @@ function Dashboard() {
     }
   };
 
-  // Fetch dashboards on mount
+  // Fetch dashboards on mount (only when authenticated)
   useEffect(() => {
+    if (status !== 'authenticated') return;
+
     const fetchDashboards = async () => {
       try {
         const response = await fetch('/api/dashboards');
         if (response.ok) {
-          const apiData = await response.json();
-          const localData = loadFromLocalStorage();
-          const mergedMap = new Map<string, SavedDashboard>();
-
-          localData.forEach((d) => mergedMap.set(d.id, d));
-          apiData.forEach((d: SavedDashboard) => mergedMap.set(d.id, d));
-
-          const merged = Array.from(mergedMap.values()).sort(
-            (a, b) => b.updatedAt - a.updatedAt
-          );
-
-          setDashboards(merged);
-          saveToLocalStorage(merged);
+          const data = await response.json();
+          setDashboards(data);
 
           // Check if there's a dashboard ID in the URL
           const dashboardId = searchParams.get('dashboard');
           if (dashboardId) {
-            const dashboard = merged.find((d) => d.id === dashboardId);
+            const dashboard = data.find((d: SavedDashboard) => d.id === dashboardId);
             if (dashboard) {
               setCurrentDashboardId(dashboard.id);
               setTickers(dashboard.tickers);
@@ -106,51 +84,31 @@ function Dashboard() {
           if (workingTickers.length > 0) {
             setTickers(workingTickers);
           }
-        } else {
-          const localData = loadFromLocalStorage();
-          setDashboards(localData);
-          const workingTickers = loadWorkingTickers();
-          if (workingTickers.length > 0) {
-            setTickers(workingTickers);
-          }
         }
       } catch (error) {
         console.error('Failed to fetch dashboards:', error);
-        const localData = loadFromLocalStorage();
-        setDashboards(localData);
-        const workingTickers = loadWorkingTickers();
-        if (workingTickers.length > 0) {
-          setTickers(workingTickers);
-        }
       } finally {
         setIsDashboardsLoading(false);
       }
     };
 
     fetchDashboards();
-  }, [searchParams]);
-
-  // Save dashboards to localStorage whenever they change
-  useEffect(() => {
-    if (dashboards.length > 0) {
-      saveToLocalStorage(dashboards);
-    }
-  }, [dashboards]);
+  }, [searchParams, status]);
 
   // Save working tickers or update dashboard when tickers change
   useEffect(() => {
+    if (status !== 'authenticated') return;
+
     if (currentDashboardId) {
       // Update the current dashboard
       const saveDashboard = async () => {
-        setDashboards((prev) => {
-          const updated = prev.map((d) =>
+        setDashboards((prev) =>
+          prev.map((d) =>
             d.id === currentDashboardId
               ? { ...d, tickers, updatedAt: Date.now() }
               : d
-          );
-          saveToLocalStorage(updated);
-          return updated;
-        });
+          )
+        );
 
         try {
           await fetch(`/api/dashboards/${currentDashboardId}`, {
@@ -169,7 +127,7 @@ function Dashboard() {
       // Save as working tickers
       saveWorkingTickers(tickers);
     }
-  }, [tickers, currentDashboardId]);
+  }, [tickers, currentDashboardId, status]);
 
   // Fetch data for a single ticker
   const fetchTickerData = useCallback(async (ticker: string) => {
@@ -256,19 +214,12 @@ function Dashboard() {
       updatedAt: now,
     };
 
-    setDashboards((prev) => {
-      const updated = [newDashboard, ...prev];
-      saveToLocalStorage(updated);
-      return updated;
-    });
+    setDashboards((prev) => [newDashboard, ...prev]);
     setCurrentDashboardId(newDashboard.id);
     setShowSaveDialog(false);
     setSaveName('');
-
-    // Clear working tickers since we saved
     saveWorkingTickers([]);
 
-    // Update URL
     window.history.pushState({}, '', `?dashboard=${newDashboard.id}`);
 
     try {
@@ -290,11 +241,7 @@ function Dashboard() {
   };
 
   const handleDeleteDashboard = async (id: string) => {
-    setDashboards((prev) => {
-      const updated = prev.filter((d) => d.id !== id);
-      saveToLocalStorage(updated);
-      return updated;
-    });
+    setDashboards((prev) => prev.filter((d) => d.id !== id));
 
     if (currentDashboardId === id) {
       setCurrentDashboardId(null);
@@ -311,13 +258,11 @@ function Dashboard() {
   };
 
   const handleRenameDashboard = async (id: string, newName: string) => {
-    setDashboards((prev) => {
-      const updated = prev.map((d) =>
+    setDashboards((prev) =>
+      prev.map((d) =>
         d.id === id ? { ...d, name: newName, updatedAt: Date.now() } : d
-      );
-      saveToLocalStorage(updated);
-      return updated;
-    });
+      )
+    );
 
     try {
       await fetch(`/api/dashboards/${id}`, {
@@ -354,6 +299,20 @@ function Dashboard() {
     });
   };
 
+  // Show loading state while checking auth
+  if (status === 'loading') {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <p className="text-gray-600">Loading...</p>
+      </div>
+    );
+  }
+
+  // Don't render if not authenticated (will redirect)
+  if (status !== 'authenticated') {
+    return null;
+  }
+
   const currentDashboard = dashboards.find((d) => d.id === currentDashboardId);
 
   const tableData: StockTableRow[] = tickers
@@ -364,12 +323,25 @@ function Dashboard() {
     <div className="min-h-screen bg-gray-50">
       <div className="max-w-7xl mx-auto px-4 py-8">
         <header className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900 mb-2">
-            Stock Performance Dashboard
-          </h1>
-          <p className="text-gray-600">
-            Track and compare stock performance metrics. Click column headers to sort.
-          </p>
+          <div className="flex justify-between items-start">
+            <div>
+              <h1 className="text-3xl font-bold text-gray-900 mb-2">
+                Stock Performance Dashboard
+              </h1>
+              <p className="text-gray-600">
+                Track and compare stock performance metrics. Click column headers to sort.
+              </p>
+            </div>
+            <div className="flex items-center gap-4">
+              <span className="text-sm text-gray-600">{session.user?.email}</span>
+              <button
+                onClick={() => signOut()}
+                className="text-sm px-3 py-1 text-gray-600 hover:text-gray-900 border border-gray-300 rounded hover:bg-gray-100 transition-colors"
+              >
+                Sign Out
+              </button>
+            </div>
+          </div>
         </header>
 
         <SavedDashboards

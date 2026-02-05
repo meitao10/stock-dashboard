@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '@/lib/auth';
 import { SavedDashboard } from '@/types';
+import '@/types'; // Import NextAuth type extensions
 
 // Check if Redis is configured
 const isRedisConfigured = () => {
   return !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
 };
 
-// Lazy load Redis to avoid errors when not configured
+// Lazy load Redis
 const getRedis = async () => {
   if (!isRedisConfigured()) return null;
   const { Redis } = await import('@upstash/redis');
@@ -16,8 +19,8 @@ const getRedis = async () => {
   });
 };
 
-const DASHBOARDS_KEY = 'dashboards';
-const DASHBOARD_PREFIX = 'dashboard:';
+const getUserDashboardsKey = (userId: string) => `user:${userId}:dashboards`;
+const getDashboardKey = (userId: string, dashboardId: string) => `user:${userId}:dashboard:${dashboardId}`;
 
 // GET /api/dashboards/[id] - Get a specific dashboard
 export async function GET(
@@ -25,32 +28,29 @@ export async function GET(
   { params }: { params: { id: string } }
 ) {
   try {
+    const session = await getServerSession(authOptions);
+    if (!session?.user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const userId = session.user.id;
     const { id } = params;
     const redis = await getRedis();
 
     if (!redis) {
-      return NextResponse.json(
-        { error: 'Dashboard not found' },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: 'Dashboard not found' }, { status: 404 });
     }
 
-    const dashboard = await redis.get<SavedDashboard>(`${DASHBOARD_PREFIX}${id}`);
+    const dashboard = await redis.get<SavedDashboard>(getDashboardKey(userId, id));
 
     if (!dashboard) {
-      return NextResponse.json(
-        { error: 'Dashboard not found' },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: 'Dashboard not found' }, { status: 404 });
     }
 
     return NextResponse.json(dashboard);
   } catch (error) {
     console.error('Error fetching dashboard:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch dashboard' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch dashboard' }, { status: 500 });
   }
 }
 
@@ -60,12 +60,17 @@ export async function PUT(
   { params }: { params: { id: string } }
 ) {
   try {
+    const session = await getServerSession(authOptions);
+    if (!session?.user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const userId = session.user.id;
     const { id } = params;
     const body = await request.json();
     const redis = await getRedis();
 
     if (!redis) {
-      // Return updated data even without Redis - frontend handles local state
       const now = Date.now();
       return NextResponse.json({
         id,
@@ -76,7 +81,7 @@ export async function PUT(
       });
     }
 
-    const existing = await redis.get<SavedDashboard>(`${DASHBOARD_PREFIX}${id}`);
+    const existing = await redis.get<SavedDashboard>(getDashboardKey(userId, id));
 
     if (!existing) {
       // Create new if doesn't exist
@@ -88,8 +93,8 @@ export async function PUT(
         createdAt: now,
         updatedAt: now,
       };
-      await redis.set(`${DASHBOARD_PREFIX}${id}`, dashboard);
-      await redis.sadd(DASHBOARDS_KEY, id);
+      await redis.set(getDashboardKey(userId, id), dashboard);
+      await redis.sadd(getUserDashboardsKey(userId), id);
       return NextResponse.json(dashboard);
     }
 
@@ -100,20 +105,12 @@ export async function PUT(
       updatedAt: Date.now(),
     };
 
-    await redis.set(`${DASHBOARD_PREFIX}${id}`, updated);
+    await redis.set(getDashboardKey(userId, id), updated);
 
     return NextResponse.json(updated);
   } catch (error) {
     console.error('Error updating dashboard:', error);
-    // Return success anyway - frontend handles local state
-    const now = Date.now();
-    return NextResponse.json({
-      id: params.id,
-      name: 'Dashboard',
-      tickers: [],
-      createdAt: now,
-      updatedAt: now,
-    });
+    return NextResponse.json({ error: 'Failed to update dashboard' }, { status: 500 });
   }
 }
 
@@ -123,18 +120,23 @@ export async function DELETE(
   { params }: { params: { id: string } }
 ) {
   try {
+    const session = await getServerSession(authOptions);
+    if (!session?.user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const userId = session.user.id;
     const { id } = params;
     const redis = await getRedis();
 
     if (redis) {
-      await redis.del(`${DASHBOARD_PREFIX}${id}`);
-      await redis.srem(DASHBOARDS_KEY, id);
+      await redis.del(getDashboardKey(userId, id));
+      await redis.srem(getUserDashboardsKey(userId), id);
     }
 
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Error deleting dashboard:', error);
-    // Return success anyway - frontend handles local state
     return NextResponse.json({ success: true });
   }
 }
