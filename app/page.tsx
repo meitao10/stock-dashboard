@@ -8,6 +8,7 @@ import SavedDashboards from '@/components/SavedDashboards';
 import { StockTableRow, SavedDashboard } from '@/types';
 
 const LOCAL_STORAGE_KEY = 'stock-dashboard-data';
+const WORKING_TICKERS_KEY = 'stock-dashboard-working';
 
 function Dashboard() {
   const searchParams = useSearchParams();
@@ -17,6 +18,8 @@ function Dashboard() {
   const [stockData, setStockData] = useState<Map<string, StockTableRow>>(new Map());
   const [isLoading, setIsLoading] = useState(false);
   const [isDashboardsLoading, setIsDashboardsLoading] = useState(true);
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [saveName, setSaveName] = useState('');
 
   // Load from localStorage
   const loadFromLocalStorage = (): SavedDashboard[] => {
@@ -42,6 +45,30 @@ function Dashboard() {
     }
   };
 
+  // Load working tickers (unsaved)
+  const loadWorkingTickers = (): string[] => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const stored = localStorage.getItem(WORKING_TICKERS_KEY);
+      if (stored) {
+        return JSON.parse(stored);
+      }
+    } catch (e) {
+      console.error('Failed to load working tickers:', e);
+    }
+    return [];
+  };
+
+  // Save working tickers
+  const saveWorkingTickers = (data: string[]) => {
+    if (typeof window === 'undefined') return;
+    try {
+      localStorage.setItem(WORKING_TICKERS_KEY, JSON.stringify(data));
+    } catch (e) {
+      console.error('Failed to save working tickers:', e);
+    }
+  };
+
   // Fetch dashboards on mount
   useEffect(() => {
     const fetchDashboards = async () => {
@@ -49,15 +76,10 @@ function Dashboard() {
         const response = await fetch('/api/dashboards');
         if (response.ok) {
           const apiData = await response.json();
-
-          // Merge with localStorage data
           const localData = loadFromLocalStorage();
           const mergedMap = new Map<string, SavedDashboard>();
 
-          // Add local data first
           localData.forEach((d) => mergedMap.set(d.id, d));
-
-          // Override with API data (if Redis is configured)
           apiData.forEach((d: SavedDashboard) => mergedMap.set(d.id, d));
 
           const merged = Array.from(mergedMap.values()).sort(
@@ -74,27 +96,32 @@ function Dashboard() {
             if (dashboard) {
               setCurrentDashboardId(dashboard.id);
               setTickers(dashboard.tickers);
+              setIsDashboardsLoading(false);
+              return;
             }
           }
+
+          // Load working tickers if no dashboard selected
+          const workingTickers = loadWorkingTickers();
+          if (workingTickers.length > 0) {
+            setTickers(workingTickers);
+          }
         } else {
-          // Fallback to localStorage
           const localData = loadFromLocalStorage();
           setDashboards(localData);
-
-          const dashboardId = searchParams.get('dashboard');
-          if (dashboardId) {
-            const dashboard = localData.find((d) => d.id === dashboardId);
-            if (dashboard) {
-              setCurrentDashboardId(dashboard.id);
-              setTickers(dashboard.tickers);
-            }
+          const workingTickers = loadWorkingTickers();
+          if (workingTickers.length > 0) {
+            setTickers(workingTickers);
           }
         }
       } catch (error) {
         console.error('Failed to fetch dashboards:', error);
-        // Fallback to localStorage
         const localData = loadFromLocalStorage();
         setDashboards(localData);
+        const workingTickers = loadWorkingTickers();
+        if (workingTickers.length > 0) {
+          setTickers(workingTickers);
+        }
       } finally {
         setIsDashboardsLoading(false);
       }
@@ -110,37 +137,38 @@ function Dashboard() {
     }
   }, [dashboards]);
 
-  // Auto-save tickers to current dashboard when they change
+  // Save working tickers or update dashboard when tickers change
   useEffect(() => {
-    if (!currentDashboardId) return;
-
-    const saveDashboard = async () => {
-      // Update local state immediately
-      setDashboards((prev) => {
-        const updated = prev.map((d) =>
-          d.id === currentDashboardId
-            ? { ...d, tickers, updatedAt: Date.now() }
-            : d
-        );
-        saveToLocalStorage(updated);
-        return updated;
-      });
-
-      // Try to save to API
-      try {
-        await fetch(`/api/dashboards/${currentDashboardId}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tickers }),
+    if (currentDashboardId) {
+      // Update the current dashboard
+      const saveDashboard = async () => {
+        setDashboards((prev) => {
+          const updated = prev.map((d) =>
+            d.id === currentDashboardId
+              ? { ...d, tickers, updatedAt: Date.now() }
+              : d
+          );
+          saveToLocalStorage(updated);
+          return updated;
         });
-      } catch (error) {
-        console.error('Failed to save to API:', error);
-        // Already saved locally, so this is fine
-      }
-    };
 
-    const timeout = setTimeout(saveDashboard, 500);
-    return () => clearTimeout(timeout);
+        try {
+          await fetch(`/api/dashboards/${currentDashboardId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tickers }),
+          });
+        } catch (error) {
+          console.error('Failed to save to API:', error);
+        }
+      };
+
+      const timeout = setTimeout(saveDashboard, 500);
+      return () => clearTimeout(timeout);
+    } else {
+      // Save as working tickers
+      saveWorkingTickers(tickers);
+    }
   }, [tickers, currentDashboardId]);
 
   // Fetch data for a single ticker
@@ -214,41 +242,43 @@ function Dashboard() {
     fetchAll();
   }, [tickers, fetchTickerData]);
 
-  const handleCreateDashboard = async (name: string) => {
+  const handleSaveDashboard = async () => {
+    if (!saveName.trim() || tickers.length === 0) return;
+
     const id = Date.now().toString(36) + Math.random().toString(36).substr(2);
     const now = Date.now();
 
     const newDashboard: SavedDashboard = {
       id,
-      name: name.trim(),
-      tickers: [],
+      name: saveName.trim(),
+      tickers: [...tickers],
       createdAt: now,
       updatedAt: now,
     };
 
-    // Update local state immediately
     setDashboards((prev) => {
       const updated = [newDashboard, ...prev];
       saveToLocalStorage(updated);
       return updated;
     });
     setCurrentDashboardId(newDashboard.id);
-    setTickers([]);
-    setStockData(new Map());
+    setShowSaveDialog(false);
+    setSaveName('');
+
+    // Clear working tickers since we saved
+    saveWorkingTickers([]);
 
     // Update URL
     window.history.pushState({}, '', `?dashboard=${newDashboard.id}`);
 
-    // Try to save to API
     try {
       await fetch('/api/dashboards', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, tickers: [] }),
+        body: JSON.stringify({ name: saveName.trim(), tickers }),
       });
     } catch (error) {
       console.error('Failed to save to API:', error);
-      // Already saved locally
     }
   };
 
@@ -256,13 +286,10 @@ function Dashboard() {
     setCurrentDashboardId(dashboard.id);
     setTickers(dashboard.tickers);
     setStockData(new Map());
-
-    // Update URL
     window.history.pushState({}, '', `?dashboard=${dashboard.id}`);
   };
 
   const handleDeleteDashboard = async (id: string) => {
-    // Update local state immediately
     setDashboards((prev) => {
       const updated = prev.filter((d) => d.id !== id);
       saveToLocalStorage(updated);
@@ -276,7 +303,6 @@ function Dashboard() {
       window.history.pushState({}, '', '/');
     }
 
-    // Try to delete from API
     try {
       await fetch(`/api/dashboards/${id}`, { method: 'DELETE' });
     } catch (error) {
@@ -285,7 +311,6 @@ function Dashboard() {
   };
 
   const handleRenameDashboard = async (id: string, newName: string) => {
-    // Update local state immediately
     setDashboards((prev) => {
       const updated = prev.map((d) =>
         d.id === id ? { ...d, name: newName, updatedAt: Date.now() } : d
@@ -294,7 +319,6 @@ function Dashboard() {
       return updated;
     });
 
-    // Try to save to API
     try {
       await fetch(`/api/dashboards/${id}`, {
         method: 'PUT',
@@ -306,13 +330,17 @@ function Dashboard() {
     }
   };
 
+  const handleNewDashboard = () => {
+    setCurrentDashboardId(null);
+    setTickers([]);
+    setStockData(new Map());
+    saveWorkingTickers([]);
+    window.history.pushState({}, '', '/');
+  };
+
   const handleAddTicker = (ticker: string) => {
-    if (!currentDashboardId) {
-      alert('Please create or select a dashboard first.');
-      return;
-    }
     if (tickers.includes(ticker)) {
-      return; // Silently ignore duplicates
+      return;
     }
     setTickers((prev) => [...prev, ticker]);
   };
@@ -349,29 +377,21 @@ function Dashboard() {
           currentDashboardId={currentDashboardId}
           isLoading={isDashboardsLoading}
           onSelectDashboard={handleSelectDashboard}
-          onCreateDashboard={handleCreateDashboard}
           onDeleteDashboard={handleDeleteDashboard}
           onRenameDashboard={handleRenameDashboard}
+          onNewDashboard={handleNewDashboard}
         />
 
         <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
           <h2 className="text-lg font-semibold text-gray-800 mb-4">Add Stock</h2>
-          <AddTickerForm
-            onAddTicker={handleAddTicker}
-            disabled={isLoading || !currentDashboardId}
-          />
-          {!currentDashboardId && (
-            <p className="text-sm text-amber-600 mt-2">
-              Create or select a dashboard above to add stocks.
-            </p>
-          )}
+          <AddTickerForm onAddTicker={handleAddTicker} disabled={isLoading} />
         </div>
 
         <div className="bg-white rounded-lg shadow-sm p-6">
           <div className="flex justify-between items-center mb-4">
             <div>
               <h2 className="text-lg font-semibold text-gray-800">
-                {currentDashboard ? currentDashboard.name : 'Your Stocks'}
+                {currentDashboard ? currentDashboard.name : 'Unsaved Dashboard'}
               </h2>
               {currentDashboard && (
                 <p className="text-xs text-gray-400">
@@ -379,14 +399,66 @@ function Dashboard() {
                 </p>
               )}
             </div>
-            {tickers.length > 0 && (
-              <span className="text-sm text-gray-500">
-                {tickers.length} stock{tickers.length !== 1 ? 's' : ''}
-              </span>
-            )}
+            <div className="flex items-center gap-3">
+              {tickers.length > 0 && (
+                <span className="text-sm text-gray-500">
+                  {tickers.length} stock{tickers.length !== 1 ? 's' : ''}
+                </span>
+              )}
+              {!currentDashboardId && tickers.length > 0 && (
+                <button
+                  onClick={() => setShowSaveDialog(true)}
+                  className="px-4 py-2 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700 transition-colors"
+                >
+                  Save Dashboard
+                </button>
+              )}
+            </div>
           </div>
           <StockTable data={tableData} onRemoveTicker={handleRemoveTicker} />
         </div>
+
+        {/* Save Dialog */}
+        {showSaveDialog && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-lg p-6 w-full max-w-md mx-4">
+              <h3 className="text-lg font-semibold text-gray-800 mb-4">Save Dashboard</h3>
+              <input
+                type="text"
+                value={saveName}
+                onChange={(e) => setSaveName(e.target.value)}
+                placeholder="Enter dashboard name..."
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 text-gray-900 mb-4"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleSaveDashboard();
+                  if (e.key === 'Escape') {
+                    setShowSaveDialog(false);
+                    setSaveName('');
+                  }
+                }}
+              />
+              <div className="flex gap-2 justify-end">
+                <button
+                  onClick={() => {
+                    setShowSaveDialog(false);
+                    setSaveName('');
+                  }}
+                  className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSaveDashboard}
+                  disabled={!saveName.trim()}
+                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 transition-colors"
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <footer className="mt-8 text-center text-sm text-gray-500">
           <p>Data provided by Yahoo Finance. Returns are calculated based on historical prices.</p>
