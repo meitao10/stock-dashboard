@@ -28,14 +28,20 @@ export interface User {
 const USER_PREFIX = 'user:';
 const USER_EMAIL_PREFIX = 'user_email:';
 
-export async function createUser(email: string, password: string): Promise<User | null> {
+export type CreateUserResult =
+  | { success: true; user: User }
+  | { success: false; error: 'redis_not_configured' | 'user_exists' | 'unknown_error' };
+
+export async function createUser(email: string, password: string): Promise<CreateUserResult> {
   const redis = await getRedis();
-  if (!redis) return null;
+  if (!redis) {
+    return { success: false, error: 'redis_not_configured' };
+  }
 
   // Check if user exists
   const existingId = await redis.get<string>(`${USER_EMAIL_PREFIX}${email.toLowerCase()}`);
   if (existingId) {
-    return null; // User already exists
+    return { success: false, error: 'user_exists' };
   }
 
   const id = Date.now().toString(36) + Math.random().toString(36).substr(2);
@@ -51,7 +57,7 @@ export async function createUser(email: string, password: string): Promise<User 
   await redis.set(`${USER_PREFIX}${id}`, user);
   await redis.set(`${USER_EMAIL_PREFIX}${email.toLowerCase()}`, id);
 
-  return user;
+  return { success: true, user };
 }
 
 export async function getUserByEmail(email: string): Promise<User | null> {

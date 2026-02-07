@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createUser, getUserByEmail } from '@/lib/auth';
+import { createUser } from '@/lib/auth';
 
 export async function POST(request: NextRequest) {
   try {
@@ -19,17 +19,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check if user exists
-    const existingUser = await getUserByEmail(email);
-    if (existingUser) {
-      return NextResponse.json(
-        { error: 'Email already registered' },
-        { status: 400 }
-      );
-    }
+    const result = await createUser(email, password);
 
-    const user = await createUser(email, password);
-    if (!user) {
+    if (!result.success) {
+      if (result.error === 'user_exists') {
+        return NextResponse.json(
+          { error: 'Email already registered' },
+          { status: 400 }
+        );
+      }
+      if (result.error === 'redis_not_configured') {
+        return NextResponse.json(
+          { error: 'Database not configured. Please set up Upstash Redis.' },
+          { status: 503 }
+        );
+      }
       return NextResponse.json(
         { error: 'Failed to create account. Please try again.' },
         { status: 500 }
